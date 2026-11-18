@@ -1,0 +1,299 @@
+# Tests PR 2's Windows ARM64 and universal macOS builds on the fork, with the
+# repo's example key. Generated from release.yaml; not part of the PR.
+name: Test PR 2 builds
+
+on:
+  push:
+    branches: [test-pr2]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: ubuntu-latest
+    env:
+      MXE_DIR: /usr/lib/mxe
+      MXE_TARGET: x86_64-w64-mingw32.static
+      MXE_PACKAGE_PREFIX: mxe-x86-64-w64-mingw32.static
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Write PUB key into file
+        run: openssl rsa -in faf_priv_example.pem -pubout -out faf_pub.pem
+
+      - name: Configure MXE
+        run: |
+          echo "deb https://pkg.mxe.cc/repos/apt focal main" | sudo tee /etc/apt/sources.list.d/mxeapt.list
+          wget -qO- https://pkg.mxe.cc/repos/apt/client-conf/mxeapt.gpg | gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/mxeapt.gpg
+          sudo apt-get update
+
+          # the part without MXE_PACKAGE_PREFIX is from https://mxe.cc/#requirements
+          sudo apt-get install \
+              autoconf \
+              automake \
+              autopoint \
+              bash \
+              bison \
+              bzip2 \
+              flex \
+              g++ \
+              g++-multilib \
+              gettext \
+              git \
+              gperf \
+              intltool \
+              libc6-dev-i386 \
+              libgdk-pixbuf2.0-dev \
+              libltdl-dev \
+              libgl-dev \
+              libpcre3-dev \
+              libssl-dev \
+              libtool-bin \
+              libxml-parser-perl \
+              lzip \
+              make \
+              openssl \
+              p7zip-full \
+              patch \
+              perl \
+              python3 \
+              python3-mako \
+              python3-packaging \
+              python3-pkg-resources \
+              python-is-python3 \
+              ruby \
+              sed \
+              sqlite3 \
+              unzip \
+              wget \
+              xz-utils \
+              $MXE_PACKAGE_PREFIX-jsoncpp \
+              $MXE_PACKAGE_PREFIX-cryptopp \
+              $MXE_PACKAGE_PREFIX-icu4c
+
+      - name: Build
+        run: |
+          # Use system cmake with MXE's toolchain file; MXE's bundled cmake
+          # links against libssl.so.1.1 which Ubuntu 24.04 doesn't provide.
+          cmake \
+            -DCMAKE_TOOLCHAIN_FILE=$MXE_DIR/usr/$MXE_TARGET/share/cmake/mxe-conf.cmake \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCRYPTOPP_LIBRARIES=$MXE_DIR/usr/$MXE_TARGET/lib/libcryptopp.a \
+            -DCRYPTOPP_INCLUDE_DIRS=$MXE_DIR/usr/$MXE_TARGET/include \
+            -DUID_SKIP_LEGACY=On \
+            -DUID_PUBKEY_BYTES=$(./encode_openssl_modulus.py $(openssl rsa -noout -inform PEM -in faf_pub.pem -pubin -modulus)) \
+            -B build
+          make -C build
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: faf-uid-windows
+          path: build/faf-uid.exe
+
+  build-windows-arm64:
+    runs-on: windows-11-arm
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # MXE has no ARM64 target, so this job builds natively with MSYS2's
+      # CLANGARM64 environment, which has static jsoncpp, cryptopp and ICU.
+      - name: Set up MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANGARM64
+          install: >-
+            mingw-w64-clang-aarch64-cc
+            mingw-w64-clang-aarch64-cmake
+            mingw-w64-clang-aarch64-ninja
+            mingw-w64-clang-aarch64-pkgconf
+            mingw-w64-clang-aarch64-jsoncpp
+            mingw-w64-clang-aarch64-crypto++
+            mingw-w64-clang-aarch64-icu
+            mingw-w64-clang-aarch64-python
+            openssl
+
+      - name: Write PUB key into file
+        run: openssl rsa -in faf_priv_example.pem -pubout -out faf_pub.pem
+
+      - name: Build
+        run: |
+          # ICU 75 and later need C++17; CMake puts this standard after the
+          # -std=c++11 of CMakeLists.txt, so it wins. U_STATIC_IMPLEMENTATION
+          # makes ICU's headers link its static library instead of its DLL,
+          # so the exe stays a single file like the x64 one.
+          cmake -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_STANDARD=17 \
+            -DCMAKE_CXX_EXTENSIONS=OFF \
+            -DCMAKE_CXX_FLAGS=-DU_STATIC_IMPLEMENTATION \
+            -DCRYPTOPP_LIBRARIES=$MINGW_PREFIX/lib/libcryptopp.a \
+            -DCRYPTOPP_INCLUDE_DIRS=$MINGW_PREFIX/include \
+            -DUID_SKIP_LEGACY=On \
+            -DUID_PUBKEY_BYTES=$(python encode_openssl_modulus.py $(openssl rsa -noout -inform PEM -in faf_pub.pem -pubin -modulus)) \
+            -B build
+          cmake --build build
+          # Next to the x64 faf-uid.exe in the release
+          mv build/faf-uid.exe build/faf-uid-arm64.exe
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: faf-uid-windows-arm64
+          path: build/faf-uid-arm64.exe
+
+      - name: Run it (example key)
+        run: |
+          python test-pr2/check_uid_ci.py key-bytes build/CMakeCache.txt CMakeLists.txt
+          ./build/faf-uid-arm64.exe 1001 > out-1.txt
+          ./build/faf-uid-arm64.exe 1002 > out-2.txt
+          python test-pr2/check_uid_ci.py check faf_priv_example.pem 1001=out-1.txt 1002=out-2.txt
+
+      - name: Show the exe's machine and DLLs
+        run: |
+          pacman -S --noconfirm --needed mingw-w64-clang-aarch64-llvm-tools
+          llvm-objdump -f build/faf-uid-arm64.exe | grep -i architecture
+          llvm-objdump -p build/faf-uid-arm64.exe | grep "DLL Name"
+
+  build-macos:
+    runs-on: macos-latest
+    env:
+      JSONCPP_VERSION: 1.7.7
+      CRYPTOPP_VERSION: 8_9_0
+      # The compilers and CMake read this. Without it the binary needs the
+      # runner's own macOS version; 11 is the first one on Apple Silicon.
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Write PUB key into file
+        run: openssl rsa -in faf_priv_example.pem -pubout -out faf_pub.pem
+
+      - name: Build jsoncpp
+        run: |
+          wget https://github.com/open-source-parsers/jsoncpp/archive/$JSONCPP_VERSION.tar.gz -O jsoncpp.tar.gz
+          tar xfz jsoncpp.tar.gz
+          cmake \
+            -DCMAKE_BUILD_TYPE=MinSizeRel \
+            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DJSONCPP_WITH_POST_BUILD_UNITTEST=OFF \
+            -DBUILD_STATIC_LIBS=ON \
+            -DBUILD_SHARED_LIBS=OFF \
+            -B jsoncpp-build \
+            -S jsoncpp-$JSONCPP_VERSION
+          make -C jsoncpp-build
+
+      - name: Build cryptopp
+        run: |
+          wget https://github.com/weidai11/cryptopp/archive/CRYPTOPP_$CRYPTOPP_VERSION.zip -O cryptopp.zip
+          unzip ./cryptopp.zip
+          mv cryptopp-CRYPTOPP_$CRYPTOPP_VERSION cryptopp
+          # cryptopp 8.9.0's GNUmakefile needs explicit arch/stdlib flags on
+          # Apple Silicon, its auto-detection is insufficient there. It picks
+          # its SIMD sources for one architecture, so each slice is built on
+          # its own and the two are joined with lipo.
+          for arch in arm64 x86_64; do
+            make -C cryptopp -f GNUmakefile CXXFLAGS="-DNDEBUG -O3 -stdlib=libc++ -arch $arch" libcryptopp.a
+            mv cryptopp/libcryptopp.a libcryptopp-$arch.a
+            make -C cryptopp -f GNUmakefile clean
+          done
+          lipo -create libcryptopp-arm64.a libcryptopp-x86_64.a -output cryptopp/libcryptopp.a
+
+      - name: Build
+        run: |
+          cmake \
+            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+            -DJSONCPP_LIBRARIES=$(pwd)/jsoncpp-build/src/lib_json/libjsoncpp.a \
+            -DJSONCPP_INCLUDE_DIRS=$(pwd)/jsoncpp-$JSONCPP_VERSION/include \
+            -DCRYPTOPP_LIBRARIES=$(pwd)/cryptopp/libcryptopp.a \
+            -DCRYPTOPP_INCLUDE_DIRS=$(pwd)/cryptopp \
+            -DCMAKE_BUILD_TYPE=MinSizeRel \
+            -DUID_PUBKEY_BYTES=$(./encode_openssl_modulus.py $(openssl rsa -noout -inform PEM -in faf_pub.pem -pubin -modulus)) \
+            -B build
+          make -C build
+          # A universal binary for Apple Silicon and Intel Macs; fails the
+          # job if a slice is missing.
+          lipo build/faf-uid -verify_arch arm64 x86_64
+          # Rename so this artifact's file doesn't collide with Linux's
+          # `faf-uid` when both are extracted into release-artifacts/.
+          mv build/faf-uid build/faf-uid-macos
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: faf-uid-macos
+          path: build/faf-uid-macos
+
+      - name: Run both slices (example key)
+        run: |
+          export PATH="$(brew --prefix openssl@3)/bin:$PATH"
+          python3 test-pr2/check_uid_ci.py key-bytes build/CMakeCache.txt CMakeLists.txt
+          lipo -archs build/faf-uid-macos
+          vtool -show-build build/faf-uid-macos | grep -E "faf-uid|minos"
+          ./build/faf-uid-macos 2001 > out-arm64.txt
+          arch -x86_64 ./build/faf-uid-macos 2002 > out-x86_64.txt
+          python3 test-pr2/check_uid_ci.py check faf_priv_example.pem 2001=out-arm64.txt 2002=out-x86_64.txt
+
+  test-macos-intel:
+    needs: build-macos
+    runs-on: macos-15-intel
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: faf-uid-macos
+          path: dl/
+
+      - name: Run it on an Intel Mac (example key)
+        run: |
+          export PATH="$(brew --prefix openssl@3)/bin:$PATH"
+          uname -m
+          chmod +x dl/faf-uid-macos
+          ./dl/faf-uid-macos 3001 > out-1.txt
+          ./dl/faf-uid-macos 3002 > out-2.txt
+          python3 test-pr2/check_uid_ci.py check faf_priv_example.pem 3001=out-1.txt 3002=out-2.txt
+
+  test-windows-x64-vs-arm64:
+    needs: [build-windows, build-windows-arm64]
+    runs-on: windows-11-arm
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANGARM64
+          install: >-
+            mingw-w64-clang-aarch64-python
+            openssl
+
+      - name: Download x64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: faf-uid-windows
+          path: dl/
+
+      - name: Download ARM64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: faf-uid-windows-arm64
+          path: dl/
+
+      - name: Compare x64 (emulated) and ARM64 on one machine (example key)
+        run: |
+          ./dl/faf-uid.exe 4001 > out-x64.txt
+          ./dl/faf-uid-arm64.exe 4001 > out-arm64.txt
+          python test-pr2/check_uid_ci.py compare faf_priv_example.pem 4001 out-x64.txt out-arm64.txt
