@@ -11,6 +11,8 @@ usage:
   check_uid_ci.py compare <example private key> <session> <output a> <output b>
       two builds run on one machine with one session send the server the
       same fields, value types and values; says whether the JSON text differs
+  check_uid_ci.py identical <example private key> <session> <output a> <output b>
+      as compare, and the JSON text must be the same byte for byte
 """
 import base64
 import json
@@ -98,7 +100,7 @@ def check(key, pairs):
     print(f"machine fields identical across {len(machines)} output(s)")
 
 
-def compare(key, session, path_a, path_b):
+def compare(key, session, path_a, path_b, same_text=False):
     text_a, data_a = decrypt(key, path_a)
     text_b, data_b = decrypt(key, path_b)
     for path, data in ((path_a, data_a), (path_b, data_b)):
@@ -115,14 +117,19 @@ def compare(key, session, path_a, path_b):
     if values:
         fail(f"values differ: {values}")
     print(f"same {len(a)} fields, same value types ({sorted({type(v).__name__ for v in a.values()})}), same values")
-    print("JSON text identical" if text_a == text_b else "JSON text differs, in formatting only")
+    if text_a == text_b:
+        print("JSON text identical")
+    elif same_text:
+        fail("JSON text differs")
+    else:
+        print("JSON text differs, in formatting only")
 
 
 if len(sys.argv) >= 4 and sys.argv[1] == "key-bytes":
     key_bytes(sys.argv[2], sys.argv[3])
 elif len(sys.argv) >= 4 and sys.argv[1] == "check":
     check(sys.argv[2], sys.argv[3:])
-elif len(sys.argv) == 6 and sys.argv[1] == "compare":
-    compare(*sys.argv[2:])
+elif len(sys.argv) == 6 and sys.argv[1] in ("compare", "identical"):
+    compare(*sys.argv[2:], same_text=sys.argv[1] == "identical")
 else:
     fail(__doc__)

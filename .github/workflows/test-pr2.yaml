@@ -94,6 +94,29 @@ jobs:
           name: faf-uid-windows
           path: build/faf-uid.exe
 
+      - name: Build master's source too (example key)
+        run: |
+          git fetch --depth 1 origin cca7b37ca7caede3342c1102e3a766c8988cacd0
+          mkdir master
+          git archive FETCH_HEAD | tar -x -C master
+          # Use system cmake with MXE's toolchain file; MXE's bundled cmake
+          # links against libssl.so.1.1 which Ubuntu 24.04 doesn't provide.
+          cmake \
+            -DCMAKE_TOOLCHAIN_FILE=$MXE_DIR/usr/$MXE_TARGET/share/cmake/mxe-conf.cmake \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCRYPTOPP_LIBRARIES=$MXE_DIR/usr/$MXE_TARGET/lib/libcryptopp.a \
+            -DCRYPTOPP_INCLUDE_DIRS=$MXE_DIR/usr/$MXE_TARGET/include \
+            -DUID_SKIP_LEGACY=On \
+            -DUID_PUBKEY_BYTES=$(./encode_openssl_modulus.py $(openssl rsa -noout -inform PEM -in faf_pub.pem -pubin -modulus)) \
+            -S master -B build-master
+          make -C build-master
+
+      - name: Upload master's build
+        uses: actions/upload-artifact@v4
+        with:
+          name: faf-uid-windows-master
+          path: build-master/faf-uid.exe
+
   build-windows-arm64:
     runs-on: windows-11-arm
     defaults:
@@ -351,8 +374,16 @@ jobs:
           name: faf-uid-windows-arm64
           path: dl/
 
-      - name: Compare x64 (emulated) and ARM64 on one machine (example key)
+      - name: Download master's x64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: faf-uid-windows-master
+          path: dl-master/
+
+      - name: Compare master's x64, the PR's x64 and ARM64 on one machine (example key)
         run: |
+          ./dl-master/faf-uid.exe 4001 > out-x64-master.txt
           ./dl/faf-uid.exe 4001 > out-x64.txt
           ./dl/faf-uid-arm64.exe 4001 > out-arm64.txt
+          python test-pr2/check_uid_ci.py identical faf_priv_example.pem 4001 out-x64-master.txt out-x64.txt
           python test-pr2/check_uid_ci.py compare faf_priv_example.pem 4001 out-x64.txt out-arm64.txt
